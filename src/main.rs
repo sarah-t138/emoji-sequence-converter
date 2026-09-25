@@ -5,9 +5,44 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::process::ExitCode;
 
+#[derive(Debug, PartialEq)]
 enum Direction {
     ToGlyphs,
     ToCodepoints,
+}
+
+#[derive(Debug, PartialEq)]
+enum ArgsOutcome {
+    Help,
+    Run {
+        direction: Direction,
+        path: Option<String>,
+    },
+    MissingDirection,
+    UnexpectedArgument(String),
+}
+
+// Pulled out of main so the parsing rules (last --to-* wins, first bare
+// argument is the path, anything after that is an error) can be tested
+// without going through env::args() or process exit codes.
+fn parse_args(args: &[String]) -> ArgsOutcome {
+    let mut direction: Option<Direction> = None;
+    let mut path: Option<String> = None;
+
+    for arg in args {
+        match arg.as_str() {
+            "--to-glyphs" => direction = Some(Direction::ToGlyphs),
+            "--to-codepoints" => direction = Some(Direction::ToCodepoints),
+            "-h" | "--help" => return ArgsOutcome::Help,
+            other if path.is_none() => path = Some(other.to_string()),
+            other => return ArgsOutcome::UnexpectedArgument(other.to_string()),
+        }
+    }
+
+    match direction {
+        Some(direction) => ArgsOutcome::Run { direction, path },
+        None => ArgsOutcome::MissingDirection,
+    }
 }
 
 fn print_usage(program: &str) {
@@ -37,29 +72,18 @@ fn main() -> ExitCode {
         .unwrap_or("emojiconv")
         .to_string();
 
-    let mut direction: Option<Direction> = None;
-    let mut path: Option<String> = None;
-
-    for arg in &args[1..] {
-        match arg.as_str() {
-            "--to-glyphs" => direction = Some(Direction::ToGlyphs),
-            "--to-codepoints" => direction = Some(Direction::ToCodepoints),
-            "-h" | "--help" => {
-                print_usage(&program);
-                return ExitCode::SUCCESS;
-            }
-            other if path.is_none() => path = Some(other.to_string()),
-            other => {
-                eprintln!("{program}: unexpected argument '{other}'");
-                print_usage(&program);
-                return ExitCode::FAILURE;
-            }
+    let (direction, path) = match parse_args(&args[1..]) {
+        ArgsOutcome::Help => {
+            print_usage(&program);
+            return ExitCode::SUCCESS;
         }
-    }
-
-    let direction = match direction {
-        Some(d) => d,
-        None => {
+        ArgsOutcome::Run { direction, path } => (direction, path),
+        ArgsOutcome::MissingDirection => {
+            print_usage(&program);
+            return ExitCode::FAILURE;
+        }
+        ArgsOutcome::UnexpectedArgument(arg) => {
+            eprintln!("{program}: unexpected argument '{arg}'");
             print_usage(&program);
             return ExitCode::FAILURE;
         }
@@ -100,5 +124,89 @@ fn main() -> ExitCode {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(strs: &[&str]) -> Vec<String> {
+        strs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_args_to_glyphs_no_path() {
+        assert_eq!(
+            parse_args(&args(&["--to-glyphs"])),
+            ArgsOutcome::Run {
+                direction: Direction::ToGlyphs,
+                path: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_args_to_codepoints_with_path() {
+        assert_eq!(
+            parse_args(&args(&["--to-codepoints", "sequences.txt"])),
+            ArgsOutcome::Run {
+                direction: Direction::ToCodepoints,
+                path: Some("sequences.txt".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_args_path_before_flag_still_works() {
+        assert_eq!(
+            parse_args(&args(&["sequences.txt", "--to-glyphs"])),
+            ArgsOutcome::Run {
+                direction: Direction::ToGlyphs,
+                path: Some("sequences.txt".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_args_last_direction_flag_wins() {
+        assert_eq!(
+            parse_args(&args(&["--to-glyphs", "--to-codepoints"])),
+            ArgsOutcome::Run {
+                direction: Direction::ToCodepoints,
+                path: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_args_help_short_and_long() {
+        assert_eq!(parse_args(&args(&["-h"])), ArgsOutcome::Help);
+        assert_eq!(parse_args(&args(&["--help"])), ArgsOutcome::Help);
+    }
+
+    #[test]
+    fn parse_args_help_wins_even_after_other_flags() {
+        assert_eq!(
+            parse_args(&args(&["--to-glyphs", "--help"])),
+            ArgsOutcome::Help
+        );
+    }
+
+    #[test]
+    fn parse_args_no_direction_is_missing() {
+        assert_eq!(parse_args(&args(&[])), ArgsOutcome::MissingDirection);
+        assert_eq!(
+            parse_args(&args(&["sequences.txt"])),
+            ArgsOutcome::MissingDirection
+        );
+    }
+
+    #[test]
+    fn parse_args_second_bare_argument_is_unexpected() {
+        assert_eq!(
+            parse_args(&args(&["--to-glyphs", "a.txt", "b.txt"])),
+            ArgsOutcome::UnexpectedArgument("b.txt".to_string())
+        );
     }
 }
